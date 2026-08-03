@@ -1,5 +1,12 @@
 # 🩹 AI Wound Assessment & Healing Tracker
 
+![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.37-FF4B4B?logo=streamlit&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
+
 A full-stack clinical AI application that takes wound photographs and runs an automated pipeline:
 
 **Image upload → MedSAM segmentation → area measurement → tissue classification → infection risk assessment → visit-over-visit healing trend → clinical report**
@@ -8,14 +15,23 @@ Built with **FastAPI + PostgreSQL** (backend), **MedSAM** (segmentation), **Open
 
 ---
 
-## 📸 Demo
+## 📸 Screenshots
 
-| Upload & Analyze | Mask Overlay | Clinical Report |
-|---|---|---|
-| Upload wound photo via the Streamlit dashboard | MedSAM segments the wound region; a red overlay shows exactly what was detected | Full tissue composition breakdown + infection risk + healing trend |
+### Analysis Dashboard
+![Dashboard](docs/screenshots/dashboard.jpg)
 
-**Example output for a deep traumatic wound:**
+### Visit History
+![Visit History](docs/screenshots/visit_history.jpg)
+
+---
+
+## 🔬 Example Output
+
 ```
+WOUND ASSESSMENT SUMMARY
+----------------------------------
+Wound area      : not calibrated
+                  (provide reference object diameter > 0 for cm² measurement)
 Tissue type     : Granulation  (83% confidence)
   Composition breakdown:
     granulation    ████████████████     83%
@@ -25,6 +41,8 @@ Infection risk  : MEDIUM
   • Slough/fibrin areas detected (8%) — monitor and consider debridement
   • ⚠ Wound depth cannot be assessed from 2D photography — clinical examination required
 Healing trend   : baseline visit — no prior visit to compare
+----------------------------------
+NOTE: Granulation tissue indicates active healing. Maintain moist wound environment.
 ```
 
 ---
@@ -78,16 +96,15 @@ wound-tracker/
 │   │       └── measurement.py    # px→cm², area change %, healing trend
 │   ├── requirements.txt
 │   ├── Dockerfile
-│   ├── .env.example
-│   └── uploads/                  # Saved wound images + mask PNGs (git-ignored)
+│   └── .env.example
 ├── frontend/
 │   ├── streamlit_app.py          # Full Streamlit dashboard
 │   └── requirements.txt
 ├── ml/
 │   ├── download_medsam_checkpoint.py  # Download MedSAM weights
 │   ├── train_segmentation.py          # Fine-tuning skeleton (SegFormer / MedSAM)
-│   ├── data/                          # Dataset prep scripts
-│   └── checkpoints/                   # Model weights (git-ignored)
+│   └── data/                          # Dataset prep scripts
+├── docs/screenshots/             # README images
 └── docker-compose.yml            # Postgres + backend for local dev
 ```
 
@@ -99,27 +116,29 @@ wound-tracker/
 - Strips black padding from the image (handles padded clinical photos)
 - Localizes the wound using **HSV color thresholding** — bright saturated reds (wound tissue) vs pale pink skin — using connected component analysis ranked by **mean saturation**, not area, to avoid selecting the whole arm
 - Passes a tight bounding box to **`SamPredictor`** (MedSAM ViT-B) for precise mask prediction
-- Falls back to a center-crop stub mask when no checkpoint is loaded (keeps the API testable)
+- Falls back to a center-crop stub mask when no checkpoint is loaded (keeps the API testable without downloading the 375 MB model)
 
 ### 2. Area Measurement
 - **Pixel area**: direct sum of mask pixels
-- **cm² area**: requires a physical reference object (coin, ruler) in the frame — user supplies the real-world diameter; the pixel diameter is currently a placeholder pending reference-object detection
+- **cm² area**: requires a physical reference object (coin, ruler) in the frame — user supplies the real-world diameter
 - **DPI fallback**: attempts to estimate cm² from EXIF metadata if present and non-generic
 
 ### 3. Tissue Classification (HSV color analysis)
+
 Classifies wound tissue from pixel colors inside the mask:
 
-| Tissue | HSV Rule |
-|---|---|
-| **Granulation** | Hue 0–12° or 168–179° (red), Saturation ≥ 75, Value ≥ 55 |
-| **Necrosis** | Value < 65 (dark), or brownish dark tones |
-| **Slough / Fibrin** | Hue 12–50° (yellow), or pale/desaturated bright (white fibrin) |
-| **Mixed** | No single category > 40% of wound pixels |
+| Tissue | HSV Rule | Clinical Meaning |
+|---|---|---|
+| **Granulation** | Hue 0–12° or 168–179°, Sat ≥ 75, Val ≥ 55 | Active healing, new vasculature |
+| **Necrosis** | Value < 65, or dark brownish tones | Dead tissue, urgent debridement needed |
+| **Slough** | Hue 12–50° (yellow), or pale desaturated bright | Fibrinous debris, impedes healing |
+| **Mixed** | No single type > 40% of wound pixels | Complex wound, monitor closely |
 
-Returns the dominant type + full percentage composition used for nuanced risk scoring.
+Returns the dominant type + **full percentage composition** used for nuanced risk scoring.
 
 ### 4. Infection Risk Assessment (rule-based)
-Uses the **full tissue composition** — not just the dominant type — so a wound that is 80% granulation but 15% slough still scores MEDIUM risk:
+
+Uses the **full tissue composition** — not just the dominant type — so a wound that is 80% granulation but 15% slough still scores **MEDIUM** risk:
 
 | Condition | Score |
 |---|---|
@@ -133,13 +152,16 @@ Uses the **full tissue composition** — not just the dominant type — so a wou
 
 Score ≥ 3 → **HIGH** · Score ≥ 1 → **MEDIUM** · Score 0 → **LOW**
 
-Always includes a depth disclaimer: wound depth cannot be assessed from 2D photography.
+> Always includes a depth disclaimer — wound depth cannot be assessed from 2D photography alone.
 
-### 5. Healing Trend
-Compares wound cm² area against the previous visit for the same patient:
-- **Improving**: area decreased ≥ 10%
-- **Stable**: area change between −10% and +10%
-- **Worsening**: area increased ≥ 10%
+### 5. Healing Trend (visit-over-visit)
+Compares wound cm² area against the **previous visit** for the same patient:
+
+| Change | Trend |
+|---|---|
+| Area decreased ≥ 10% | ↓ Improving |
+| Change between −10% and +10% | → Stable |
+| Area increased ≥ 10% | ↑ Worsening |
 
 ---
 
@@ -152,26 +174,26 @@ Compares wound cm² area against the previous visit for the same patient:
 
 ### 1. Clone the repo
 ```bash
-git clone https://github.com/Dileepreddy2704/wound-tracker.git
-cd wound-tracker
+git clone https://github.com/Dileepreddy2704/Wound-tracker.git
+cd Wound-tracker
 ```
 
 ### 2. Set up environment
 ```bash
 cp backend/.env.example backend/.env
-# Edit backend/.env and set your DATABASE_URL
+# Edit backend/.env — set your DATABASE_URL
 ```
 
-### 3a. Run with Docker (recommended)
+### 3. Run with Docker (recommended)
 ```bash
 docker compose up --build
 ```
 - API: http://localhost:8000
-- Docs: http://localhost:8000/docs
+- Interactive docs: http://localhost:8000/docs
 
-### 3b. Run without Docker
+### 4. Run without Docker
 ```bash
-# Backend
+# Terminal 1 — Backend
 cd backend
 python -m venv venv
 venv\Scripts\activate          # Windows
@@ -179,7 +201,7 @@ venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 
-# Frontend (new terminal)
+# Terminal 2 — Frontend
 cd frontend
 pip install -r requirements.txt
 streamlit run streamlit_app.py
@@ -187,18 +209,20 @@ streamlit run streamlit_app.py
 - API: http://localhost:8000
 - Dashboard: http://localhost:8501
 
-### 4. Download MedSAM checkpoint
-Without the checkpoint the API still works (uses a stub mask for testing).
-To enable real segmentation:
+### 5. Download MedSAM checkpoint
+
+Without the checkpoint the API still works (uses a stub mask for testing). To enable real segmentation:
+
 ```bash
 # Get the file ID from https://github.com/bowang-lab/MedSAM
 python ml/download_medsam_checkpoint.py --gdrive_id <FILE_ID>
 ```
+
 Then set in `backend/.env`:
 ```
 MEDSAM_CHECKPOINT_PATH=../ml/checkpoints/medsam_vit_b.pth
 ```
-Restart the backend — real MedSAM inference will now run.
+Restart the backend — real MedSAM inference will now run on every `/analyze/{visit_id}` call.
 
 ---
 
@@ -207,13 +231,13 @@ Restart the backend — real MedSAM inference will now run.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/` | Health check |
-| `POST` | `/patients/` | Create a patient (reference code, no PII) |
+| `POST` | `/patients/` | Create a patient (reference code only, no PII) |
 | `GET` | `/patients/` | List all patients |
 | `GET` | `/patients/{id}` | Get a patient by ID |
 | `POST` | `/visits/` | Upload wound photo (multipart: image + patient_id) |
-| `GET` | `/visits/{patient_id}` | List all visits for a patient |
+| `GET` | `/visits/{patient_id}` | List all visits for a patient (ordered by date) |
 | `POST` | `/analyze/{visit_id}` | Run full analysis pipeline on a visit |
-| `GET` | `/uploads/{filename}` | Serve an uploaded image or saved mask |
+| `GET` | `/uploads/{filename}` | Serve an uploaded image or saved mask PNG |
 
 Interactive Swagger docs: **http://localhost:8000/docs**
 
@@ -221,10 +245,10 @@ Interactive Swagger docs: **http://localhost:8000/docs**
 
 ## 🗺️ Roadmap
 
-- [ ] Reference-object auto-detection (ArUco marker / circle detection) for reliable cm²
-- [ ] Fine-tune SegFormer on the AZH wound dataset for mask precision
-- [ ] Replace rule-based tissue classifier with a trained CNN/ViT classifier
-- [ ] LLM-generated clinical reports (swap template text in `_build_report`)
+- [ ] Reference-object auto-detection (ArUco marker / circle detection) for reliable cm² without manual input
+- [ ] Fine-tune SegFormer on the AZH wound dataset for improved mask precision
+- [ ] Replace HSV tissue classifier with a trained CNN/ViT classifier
+- [ ] LLM-generated clinical reports (replace template text in `_build_report`)
 - [ ] Wound depth estimation using structured light or stereo imaging
 - [ ] Patient authentication + role-based access (clinician vs. patient views)
 - [ ] Export reports as PDF
@@ -237,12 +261,12 @@ Interactive Swagger docs: **http://localhost:8000/docs**
 |---|---|
 | **Segmentation** | MedSAM with HSV-guided box prompt — works well on vivid red wounds; may miss necrotic/slough-covered wounds |
 | **cm² measurement** | Requires a physical reference object in the photo; EXIF DPI fallback unreliable on smartphones |
-| **Tissue classification** | HSV rule-based; fails on unusual lighting, very dark skin tones, or heavy dressing residue |
-| **Infection risk** | Rule-based, not a validated clinical classifier — should not replace clinical judgment |
+| **Tissue classification** | HSV rule-based; can misfire on unusual lighting, dark skin tones, or dressing residue |
+| **Infection risk** | Rule-based scoring, not a validated clinical classifier |
 | **Wound depth** | Cannot be assessed from 2D photography |
 | **Report generation** | Template text — not LLM-generated |
 
-> **This tool is for research and educational purposes only. It is not a medical device and must not be used as a substitute for clinical assessment by a qualified healthcare professional.**
+> ⚠️ **Disclaimer:** This tool is for research and educational purposes only. It is not a certified medical device and must not replace clinical assessment by a qualified healthcare professional.
 
 ---
 
