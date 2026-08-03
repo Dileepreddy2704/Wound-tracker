@@ -39,7 +39,11 @@ def analyze_visit(visit_id: str, db: Session = Depends(get_db)):
     if not visit:
         raise HTTPException(status_code=404, detail="Visit not found")
 
-    image    = Image.open(visit.image_path).convert("RGB")
+    try:
+        image    = Image.open(visit.image_path).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Cannot open image: {e}")
+
     image_np = np.array(image)
 
     # 1. Segmentation
@@ -51,11 +55,8 @@ def analyze_visit(visit_id: str, db: Session = Depends(get_db)):
     Image.fromarray((mask * 255).astype("uint8")).save(mask_path)
 
     # 2. Wound area in cm²
-    #    Priority: (a) user-supplied reference object, (b) EXIF DPI fallback.
     area_cm2 = None
     if visit.reference_object_diameter_cm:
-        # TODO: replace placeholder_ref_px with detected reference-object size
-        # once reference-object detection is wired in.
         placeholder_ref_px = 50.0
         area_cm2 = px_to_cm2(
             area_px,
@@ -103,6 +104,12 @@ def analyze_visit(visit_id: str, db: Session = Depends(get_db)):
         trend,
         change_pct,
     )
+
+    # 8. Save — delete any prior analysis for this visit first so re-runs work
+    existing = db.query(models.WoundAnalysis).filter_by(visit_id=visit_id).first()
+    if existing:
+        db.delete(existing)
+        db.flush()
 
     analysis = models.WoundAnalysis(
         visit_id=visit.id,
