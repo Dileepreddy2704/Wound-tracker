@@ -18,10 +18,11 @@ Built with **FastAPI + PostgreSQL** (backend), **MedSAM** (segmentation), **Open
 ## 📸 Screenshots
 
 ### Analysis Dashboard
-![Dashboard](docs/screenshots/dashboard.jpg)
+<img width="1907" height="841" alt="image" src="https://github.com/user-attachments/assets/c48cf4ba-e2e2-488f-b815-db661836c2c5" />
+
 
 ### Visit History
-![Visit History](docs/screenshots/visit_history.jpg)
+<img width="1597" height="816" alt="image" src="https://github.com/user-attachments/assets/536df7f8-4054-45a5-bef8-207a60220936" />
 
 ---
 
