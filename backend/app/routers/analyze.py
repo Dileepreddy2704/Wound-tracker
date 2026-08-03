@@ -88,9 +88,13 @@ def analyze_visit(visit_id: str, db: Session = Depends(get_db)):
         change_pct = area_change_pct(area_cm2, prev_visit.analysis.area_cm2)
         trend      = classify_trend(change_pct)
 
-    # 6. Clinical report
+    # 6. Wound type classification (morphology-based shape analysis)
+    wound_type, wound_type_confidence = _classify_wound_type(mask)
+
+    # 7. Clinical report
     report_text = _build_report(
         area_cm2,
+        wound_type,
         tissue_type,
         tissue_confidence,
         tissue_composition,
@@ -107,6 +111,8 @@ def analyze_visit(visit_id: str, db: Session = Depends(get_db)):
         area_cm2=area_cm2,
         tissue_type=tissue_type,
         tissue_confidence=tissue_confidence,
+        wound_type=wound_type,
+        wound_type_confidence=wound_type_confidence,
         infection_risk_flag=infection_risk_flag,
         infection_indicators=infection_indicators,
         area_change_pct=change_pct,
@@ -181,6 +187,108 @@ def _classify_tissue(
     if conf < 0.40:
         return "mixed", round(max(pcts.values()), 2), pcts
     return dominant, round(conf, 2), pcts
+
+
+# ---------------------------------------------------------------------------
+# Wound type classification
+# ---------------------------------------------------------------------------
+
+def _classify_wound_type(mask: np.ndarray) -> tuple[str, float]:
+    """
+    Classify the wound type from the shape and morphology of the segmentation mask.
+
+    Types (matching standard clinical categories):
+      - puncture   : small, circular / oval deep hole  (nail, needle)
+      - incision   : long, narrow, clean-edged linear cut  (scalpel, knife)
+      - laceration : irregular, jagged tear  (blunt trauma)
+      - abrasion   : wide, shallow scrape  (friction)
+      - avulsion   : flap of tissue torn away  (high-energy trauma)
+      - burn        : large, irregular, often with diffuse boundary
+
+    Shape descriptors used:
+      - Circularity      = 4π·Area / Perimeter²  (1.0 = perfect circle)
+      - Aspect ratio     = major axis / minor axis  (fitted ellipse)
+      - Solidity         = Area / Convex Hull Area  (1.0 = smooth convex)
+      - Relative area    = wound pixels / total image pixels
+      - Extent           = Area / Bounding Box Area
+
+    Note: this is a morphology heuristic — accuracy is limited for
+    irregular or partially-occluded wounds. A trained classifier
+    would significantly outperform these rules.
+    """
+    mask_uint8 = (mask * 255).astype(np.uint8)
+    contours, _ = cv2.findContours(
+        mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
+        return "unknown", 0.0
+
+    # Use the largest contour (the primary wound boundary)
+    contour = max(contours, key=cv2.contourArea)
+    area    = cv2.contourArea(contour)
+
+    if area < 100:
+        return "unknown", 0.0
+
+    perimeter = cv2.arcLength(contour, closed=True)
+
+    # ── Shape descriptors ────────────────────────────────────────────────
+    # Circularity: 1.0 = perfect circle; lower → more elongated/irregular
+    circularity = (4 * np.pi * area / (perimeter ** 2)) if perimeter > 0 else 0.0
+
+    # Solidity: 1.0 = smooth convex boundary; lower → jagged / irregular
+    hull      = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    solidity  = area / hull_area if hull_area > 0 else 0.0
+
+    # Aspect ratio from fitted ellipse (more stable than bounding box)
+    if len(contour) >= 5:
+        _, (minor_ax, major_ax), _ = cv2.fitEllipse(contour)
+        aspect_ratio = major_ax / minor_ax if minor_ax > 0 else 1.0
+    else:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        aspect_ratio = max(bw, bh) / max(min(bw, bh), 1)
+
+    # Extent: how much of the bounding box the wound fills
+    x, y, bw, bh = cv2.boundingRect(contour)
+    extent = area / (bw * bh) if (bw * bh) > 0 else 0.0
+
+    # Relative size of the wound in the full image
+    relative_area = area / mask.size
+
+    # ── Classification rules (order = priority) ──────────────────────────
+
+    # Puncture: small + circular
+    if relative_area < 0.015 and circularity > 0.60:
+        conf = round(min(circularity, 1.0), 2)
+        return "puncture", conf
+
+    # Incision: elongated + smooth edges
+    if aspect_ratio > 2.8 and solidity > 0.68:
+        conf = round(min(aspect_ratio / 6.0, 1.0), 2)
+        return "incision", conf
+
+    # Burn: large area + diffuse/irregular boundary
+    if relative_area > 0.10 and circularity < 0.45:
+        return "burn", round(1.0 - circularity, 2)
+
+    # Laceration: irregular/jagged edges regardless of size
+    if solidity < 0.58:
+        conf = round(1.0 - solidity, 2)
+        return "laceration", conf
+
+    # Abrasion: moderate-to-large, oval/round, fills much of its bbox
+    if relative_area > 0.015 and extent > 0.55 and circularity > 0.30:
+        conf = round(min(extent, 1.0), 2)
+        return "abrasion", conf
+
+    # Avulsion: fills bbox well but edges aren't smooth
+    if extent > 0.55 and solidity < 0.80:
+        return "avulsion", round(1.0 - solidity + 0.2, 2)
+
+    # Default fallback
+    return "laceration", 0.40
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +430,7 @@ def _estimate_cm2_from_dpi(image: Image.Image, area_px: float) -> float | None:
 
 def _build_report(
     area_cm2: float | None,
+    wound_type: str,
     tissue_type: str,
     tissue_confidence: float | None,
     tissue_composition: dict | None,
@@ -331,6 +440,9 @@ def _build_report(
     change_pct: float | None,
 ) -> str:
     lines = ["WOUND ASSESSMENT SUMMARY", "-" * 34]
+
+    # Wound type
+    lines.append(f"Wound type      : {wound_type.capitalize()}")
 
     # Area
     if area_cm2:
@@ -376,16 +488,29 @@ def _build_report(
 
     lines.append("-" * 34)
 
-    # Actionable clinical note
-    note_map = {
+    # Wound-type specific clinical note
+    wound_note_map = {
+        "incision":  "NOTE: Clean incised wound — assess depth and consider suturing if edges are approximable.",
+        "laceration":"NOTE: Laceration with irregular edges — irrigate thoroughly, consider closure method.",
+        "abrasion":  "NOTE: Abrasion wound — clean debris, apply non-adherent dressing, monitor for infection.",
+        "burn":      "⚠ BURN WOUND: Assess depth (superficial/partial/full thickness). Refer to burns specialist if deep.",
+        "avulsion":  "⚠ AVULSION: Significant tissue loss — specialist review recommended for reconstruction.",
+        "puncture":  "NOTE: Puncture wound — high infection risk despite small surface area. Assess depth and tetanus status.",
+    }
+    wound_note = wound_note_map.get(wound_type)
+    if wound_note:
+        lines.append(wound_note)
+
+    # Tissue-type specific clinical note
+    tissue_note_map = {
         "necrosis":    "⚠ URGENT: Necrotic tissue requires prompt surgical or enzymatic debridement.",
         "slough":      "NOTE: Wound bed preparation and debridement recommended before re-dressing.",
         "granulation": "NOTE: Granulation tissue indicates active healing. Maintain moist wound environment.",
         "mixed":       "NOTE: Multiple tissue types present. Reassess after next dressing change.",
     }
-    note = note_map.get(tissue_type)
-    if note:
-        lines.append(note)
+    tissue_note = tissue_note_map.get(tissue_type)
+    if tissue_note:
+        lines.append(tissue_note)
 
     return "\n".join(lines)
 

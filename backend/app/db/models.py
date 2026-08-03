@@ -62,6 +62,9 @@ class WoundAnalysis(Base):
     tissue_type = Column(String, nullable=True)         # granulation / necrosis / slough / mixed
     tissue_confidence = Column(Float, nullable=True)
 
+    wound_type = Column(String, nullable=True)           # incision / laceration / abrasion / burn / avulsion / puncture
+    wound_type_confidence = Column(Float, nullable=True)
+
     infection_risk_flag = Column(String, nullable=True)  # low / medium / high
     infection_indicators = Column(Text, nullable=True)   # JSON string of matched signals
 

@@ -390,12 +390,37 @@ with tab_analyze:
             st.divider()
 
             # ── Metric row ────────────────────────────────────────────────
-            area_px  = analysis.get("area_px")
-            area_cm2 = analysis.get("area_cm2")
-            tissue   = (analysis.get("tissue_type") or "unclassified").capitalize()
-            tissue_conf = analysis.get("tissue_confidence")
-            change   = analysis.get("area_change_pct")
+            area_px         = analysis.get("area_px")
+            area_cm2        = analysis.get("area_cm2")
+            tissue          = (analysis.get("tissue_type") or "unclassified").capitalize()
+            tissue_conf     = analysis.get("tissue_confidence")
+            wound_type      = (analysis.get("wound_type") or "unknown").capitalize()
+            wound_type_conf = analysis.get("wound_type_confidence")
+            change          = analysis.get("area_change_pct")
 
+            # Row 1: wound type (prominent, spans full width)
+            wt_conf_str = f"  ({wound_type_conf*100:.0f}% confidence)" if wound_type_conf else ""
+
+            # Wound type icon map
+            wt_icons = {
+                "Incision":  "🔪", "Laceration": "⚡", "Abrasion": "🛞",
+                "Burn":      "🔥", "Avulsion":   "⚠️", "Puncture": "📍",
+                "Unknown":   "❓",
+            }
+            wt_icon = wt_icons.get(wound_type, "🩹")
+            st.markdown(
+                f"<div style='background:rgba(255,255,255,0.05);border-radius:10px;"
+                f"padding:12px 20px;margin-bottom:12px;border-left:4px solid #e74c3c'>"
+                f"<span style='font-size:0.8em;color:#aaa;text-transform:uppercase;"
+                f"letter-spacing:1px'>Wound Type</span><br>"
+                f"<span style='font-size:1.6em;font-weight:700'>"
+                f"{wt_icon} {wound_type}</span>"
+                f"<span style='font-size:0.85em;color:#aaa'>{wt_conf_str}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Row 2: area + tissue + change metrics
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Wound area (px)",  f"{int(area_px):,}" if area_px else "—")
             m2.metric(

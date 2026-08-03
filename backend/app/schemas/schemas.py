@@ -43,6 +43,8 @@ class WoundAnalysisOut(BaseModel):
     area_cm2: Optional[float]
     tissue_type: Optional[str]
     tissue_confidence: Optional[float]
+    wound_type: Optional[str]           # incision / laceration / abrasion / burn / avulsion / puncture
+    wound_type_confidence: Optional[float]
     infection_risk_flag: Optional[str]
     infection_indicators: Optional[str]
     area_change_pct: Optional[float]
