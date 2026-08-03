@@ -206,89 +206,94 @@ def _classify_wound_type(mask: np.ndarray) -> tuple[str, float]:
       - burn        : large, irregular, often with diffuse boundary
 
     Shape descriptors used:
-      - Circularity      = 4π·Area / Perimeter²  (1.0 = perfect circle)
-      - Aspect ratio     = major axis / minor axis  (fitted ellipse)
-      - Solidity         = Area / Convex Hull Area  (1.0 = smooth convex)
-      - Relative area    = wound pixels / total image pixels
-      - Extent           = Area / Bounding Box Area
-
-    Note: this is a morphology heuristic — accuracy is limited for
-    irregular or partially-occluded wounds. A trained classifier
-    would significantly outperform these rules.
+      - Circularity   = 4π·Area / Perimeter²  (1.0 = perfect circle)
+      - Aspect ratio  = major axis / minor axis  (fitted ellipse)
+      - Solidity      = Area / Convex Hull Area  (1.0 = smooth convex)
+      - Relative area = wound pixels / total image pixels
+      - Extent        = Area / Bounding Box Area
     """
-    mask_uint8 = (mask * 255).astype(np.uint8)
-    contours, _ = cv2.findContours(
-        mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    try:
+        mask_uint8 = (mask * 255).astype(np.uint8)
+        contours, _ = cv2.findContours(
+            mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
 
-    if not contours:
-        return "unknown", 0.0
+        if not contours:
+            return "unknown", 0.0
 
-    # Use the largest contour (the primary wound boundary)
-    contour = max(contours, key=cv2.contourArea)
-    area    = cv2.contourArea(contour)
+        # Use the largest contour (the primary wound boundary)
+        contour = max(contours, key=cv2.contourArea)
+        area    = cv2.contourArea(contour)
 
-    if area < 100:
-        return "unknown", 0.0
+        if area < 100:
+            return "unknown", 0.0
 
-    perimeter = cv2.arcLength(contour, closed=True)
+        perimeter = cv2.arcLength(contour, True)   # positional arg, not keyword
 
-    # ── Shape descriptors ────────────────────────────────────────────────
-    # Circularity: 1.0 = perfect circle; lower → more elongated/irregular
-    circularity = (4 * np.pi * area / (perimeter ** 2)) if perimeter > 0 else 0.0
+        # ── Shape descriptors ────────────────────────────────────────────
+        # Circularity: 1.0 = perfect circle; lower → elongated/irregular
+        circularity = (4 * np.pi * area / (perimeter ** 2)) if perimeter > 0 else 0.0
 
-    # Solidity: 1.0 = smooth convex boundary; lower → jagged / irregular
-    hull      = cv2.convexHull(contour)
-    hull_area = cv2.contourArea(hull)
-    solidity  = area / hull_area if hull_area > 0 else 0.0
+        # Solidity: 1.0 = smooth convex; lower → jagged/irregular
+        hull      = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity  = area / hull_area if hull_area > 0 else 0.0
 
-    # Aspect ratio from fitted ellipse (more stable than bounding box)
-    if len(contour) >= 5:
-        _, (minor_ax, major_ax), _ = cv2.fitEllipse(contour)
-        aspect_ratio = major_ax / minor_ax if minor_ax > 0 else 1.0
-    else:
+        # Aspect ratio from fitted ellipse
+        # NOTE: always take max/min — OpenCV returns (width, height) not (minor, major)
+        if len(contour) >= 5:
+            try:
+                _, (ax1, ax2), _ = cv2.fitEllipse(contour)
+                major_ax     = max(ax1, ax2)
+                minor_ax     = min(ax1, ax2)
+                aspect_ratio = major_ax / minor_ax if minor_ax > 0 else 1.0
+            except cv2.error:
+                x, y, bw, bh = cv2.boundingRect(contour)
+                aspect_ratio = max(bw, bh) / max(min(bw, bh), 1)
+        else:
+            x, y, bw, bh = cv2.boundingRect(contour)
+            aspect_ratio = max(bw, bh) / max(min(bw, bh), 1)
+
+        # Extent: fraction of bounding box filled by the wound
         x, y, bw, bh = cv2.boundingRect(contour)
-        aspect_ratio = max(bw, bh) / max(min(bw, bh), 1)
+        extent = area / (bw * bh) if (bw * bh) > 0 else 0.0
 
-    # Extent: how much of the bounding box the wound fills
-    x, y, bw, bh = cv2.boundingRect(contour)
-    extent = area / (bw * bh) if (bw * bh) > 0 else 0.0
+        # Relative wound size in the full image
+        relative_area = area / max(mask.size, 1)
 
-    # Relative size of the wound in the full image
-    relative_area = area / mask.size
+        # ── Classification rules (order = priority) ──────────────────────
 
-    # ── Classification rules (order = priority) ──────────────────────────
+        # Puncture: small + circular
+        if relative_area < 0.015 and circularity > 0.60:
+            return "puncture", round(min(circularity, 1.0), 2)
 
-    # Puncture: small + circular
-    if relative_area < 0.015 and circularity > 0.60:
-        conf = round(min(circularity, 1.0), 2)
-        return "puncture", conf
+        # Incision: elongated + smooth edges
+        if aspect_ratio > 2.8 and solidity > 0.68:
+            return "incision", round(min(aspect_ratio / 6.0, 1.0), 2)
 
-    # Incision: elongated + smooth edges
-    if aspect_ratio > 2.8 and solidity > 0.68:
-        conf = round(min(aspect_ratio / 6.0, 1.0), 2)
-        return "incision", conf
+        # Burn: large area + diffuse/irregular boundary
+        if relative_area > 0.10 and circularity < 0.45:
+            return "burn", round(1.0 - circularity, 2)
 
-    # Burn: large area + diffuse/irregular boundary
-    if relative_area > 0.10 and circularity < 0.45:
-        return "burn", round(1.0 - circularity, 2)
+        # Laceration: irregular/jagged edges
+        if solidity < 0.58:
+            return "laceration", round(1.0 - solidity, 2)
 
-    # Laceration: irregular/jagged edges regardless of size
-    if solidity < 0.58:
-        conf = round(1.0 - solidity, 2)
-        return "laceration", conf
+        # Abrasion: moderate-to-large, oval/round, fills bbox
+        if relative_area > 0.015 and extent > 0.55 and circularity > 0.30:
+            return "abrasion", round(min(extent, 1.0), 2)
 
-    # Abrasion: moderate-to-large, oval/round, fills much of its bbox
-    if relative_area > 0.015 and extent > 0.55 and circularity > 0.30:
-        conf = round(min(extent, 1.0), 2)
-        return "abrasion", conf
+        # Avulsion: fills bbox but edges aren't smooth
+        if extent > 0.55 and solidity < 0.80:
+            return "avulsion", round(min(1.0 - solidity + 0.2, 1.0), 2)
 
-    # Avulsion: fills bbox well but edges aren't smooth
-    if extent > 0.55 and solidity < 0.80:
-        return "avulsion", round(1.0 - solidity + 0.2, 2)
+        return "laceration", 0.40   # default fallback
 
-    # Default fallback
-    return "laceration", 0.40
+    except Exception as exc:
+        # Never let shape analysis crash the whole pipeline
+        print(f"[WARN] _classify_wound_type failed: {exc}")
+        return "unknown", 0.0
+
 
 
 # ---------------------------------------------------------------------------
